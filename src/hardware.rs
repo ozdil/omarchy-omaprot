@@ -535,21 +535,14 @@ fn detect_gpus() -> Vec<GpuDevice> {
 
             let is_igpu = label.contains("onboard")
                 || label.contains("integrated")
-                || bdf.ends_with(":00:02.0")
-                || bdf.ends_with(":00:02.1")
+                || bdf.contains(":00:")
                 || link_width == "0"
                 || real_dev.contains("/0000:00:08.");
 
             let is_discrete = if ven == "10de" || cls.starts_with("0x0302") {
                 true
-            } else if is_igpu {
-                false
-            } else if vram_bytes >= 4_294_967_296 {
-                true
-            } else if vram_bytes > 0 {
-                false
             } else {
-                cls.starts_with("0x0380") || !bdf.contains(":00:")
+                !is_igpu
             };
 
             let (vendor_name, vulkan_icd) = match ven.as_str() {
@@ -568,6 +561,7 @@ fn detect_gpus() -> Vec<GpuDevice> {
                 _ => ("Generic".to_string(), String::new()),
             };
 
+            let _ = vram_bytes;
             let model_name = format!(
                 "{} {} [{}:{}]",
                 vendor_name,
