@@ -448,7 +448,7 @@ mod tests {
         assert!(!rep.autotune_plan.decisions.is_empty());
         assert!(!rep.autotune_plan.merged_env.is_empty());
         let exports = autotune::render_shell_exports(&rep.autotune_plan);
-        assert!(exports.contains("unset PROTON_NO_NTSYNC"));
+        assert!(!exports.contains("unset PROTON_NO_FSYNC"));
         assert!(exports.contains("export PROTON_CPU_TOPOLOGY="));
     }
 

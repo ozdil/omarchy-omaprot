@@ -497,56 +497,110 @@ pub fn classify_topology_from_observations(
 
 fn detect_gpus() -> Vec<GpuDevice> {
     let mut gpus = Vec::new();
-    let deadline = Instant::now() + Duration::from_millis(900);
-    if let Some(out) = subproc::run_cmd_bounded("/usr/bin/lspci", &["-nn"], deadline, 65536) {
-        for line in out.lines() {
-            let lower = line.to_lowercase();
-            if !(lower.contains("vga compatible controller")
-                || lower.contains("3d controller")
-                || lower.contains("display controller"))
-            {
+    let pci_root = Path::new("/sys/bus/pci/devices");
+    if let Ok(entries) = fs::read_dir(pci_root) {
+        let mut dev_paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        dev_paths.sort();
+        for dev in dev_paths {
+            let cls = securefs::read_bounded_file(&dev.join("class"), 32, false)
+                .map(|s| s.trim().to_lowercase())
+                .unwrap_or_default();
+            if !cls.starts_with("0x03") {
                 continue;
             }
-            let pci_slot = line.split_whitespace().next().unwrap_or("00:00.0").to_string();
-            let (vendor_id, device_id) = extract_pci_ids(line);
-            let (vendor_name, is_discrete, vulkan_icd) = match vendor_id.as_str() {
+            let ven = securefs::read_bounded_file(&dev.join("vendor"), 32, false)
+                .map(|s| s.trim().trim_start_matches("0x").to_lowercase())
+                .unwrap_or_default();
+            let did = securefs::read_bounded_file(&dev.join("device"), 32, false)
+                .map(|s| s.trim().trim_start_matches("0x").to_lowercase())
+                .unwrap_or_default();
+            let bdf = dev
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "0000:00:00.0".into());
+            let real_dev = fs::canonicalize(&dev)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let label = securefs::read_bounded_file(&dev.join("label"), 128, false)
+                .map(|s| s.trim().to_lowercase())
+                .unwrap_or_default();
+            let link_width =
+                securefs::read_bounded_file(&dev.join("current_link_width"), 32, false)
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default();
+            let vram_bytes =
+                securefs::read_bounded_file(&dev.join("mem_info_vram_total"), 64, false)
+                    .and_then(|s| s.trim().parse::<u64>().ok())
+                    .unwrap_or(0);
+
+            let is_igpu = label.contains("onboard")
+                || label.contains("integrated")
+                || bdf.ends_with(":00:02.0")
+                || bdf.ends_with(":00:02.1")
+                || link_width == "0"
+                || real_dev.contains("/0000:00:08.");
+
+            let is_discrete = if ven == "10de" || cls.starts_with("0x0302") {
+                true
+            } else if is_igpu {
+                false
+            } else if vram_bytes >= 4_294_967_296 {
+                true
+            } else if vram_bytes > 0 {
+                false
+            } else {
+                cls.starts_with("0x0380") || !bdf.contains(":00:")
+            };
+
+            let (vendor_name, vulkan_icd) = match ven.as_str() {
                 "10de" => (
                     "NVIDIA".to_string(),
-                    true,
                     "/usr/share/vulkan/icd.d/nvidia_icd.json".to_string(),
                 ),
                 "1002" => (
                     "AMD".to_string(),
-                    lower.contains("rx ")
-                        || lower.contains("radeon pro")
-                        || lower.contains("navi "),
                     "/usr/share/vulkan/icd.d/radeon_icd.x86_64.json".to_string(),
                 ),
                 "8086" => (
                     "Intel".to_string(),
-                    lower.contains("arc a")
-                        || lower.contains("arc b")
-                        || lower.contains("dg2")
-                        || lower.contains("battlemage"),
                     "/usr/share/vulkan/icd.d/intel_icd.x86_64.json".to_string(),
                 ),
-                _ => ("Generic".to_string(), false, String::new()),
+                _ => ("Generic".to_string(), String::new()),
             };
-            let model_name = line
-                .splitn(3, ':')
-                .nth(2)
-                .map(|s| s.trim().to_string())
-                .unwrap_or_else(|| line.to_string());
+
+            let model_name = format!(
+                "{} {} [{}:{}]",
+                vendor_name,
+                if is_discrete { "dGPU" } else { "iGPU" },
+                ven,
+                did
+            );
 
             gpus.push(GpuDevice {
-                pci_slot,
-                vendor_id,
-                device_id,
+                pci_slot: bdf,
+                vendor_id: ven,
+                device_id: did,
                 vendor_name,
                 model_name,
                 is_discrete,
                 vulkan_icd,
             });
+        }
+    }
+
+    // Enrich human-readable model names from lspci if available
+    let deadline = Instant::now() + Duration::from_millis(600);
+    if let Some(out) = subproc::run_cmd_bounded("/usr/bin/lspci", &["-nn"], deadline, 65536) {
+        for line in out.lines() {
+            let (ven, did) = extract_pci_ids(line);
+            if let Some(gpu) = gpus
+                .iter_mut()
+                .find(|g| g.vendor_id == ven && g.device_id == did)
+            {
+                if let Some(desc) = line.splitn(3, ':').nth(2) {
+                    gpu.model_name = desc.trim().to_string();
+                }
+            }
         }
     }
     gpus
@@ -589,20 +643,33 @@ fn detect_ac_power() -> bool {
         Ok(e) => e,
         Err(_) => return true,
     };
-    let mut found_supply = false;
+    let mut has_battery = false;
+    let mut battery_discharging = false;
     for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_uppercase();
-        if name.starts_with("AC") || name.starts_with("ADP") || name.starts_with("ACAD") {
-            found_supply = true;
-            let online_path = entry.path().join("online");
-            if let Some(v) = securefs::read_bounded_file(&online_path, 16, false) {
-                if v.trim() == "1" {
-                    return true;
+        let p = entry.path();
+        let supply_type = securefs::read_bounded_file(&p.join("type"), 32, false)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        match supply_type.as_str() {
+            "Mains" | "USB" => {
+                if let Some(v) = securefs::read_bounded_file(&p.join("online"), 16, false) {
+                    if v.trim() == "1" {
+                        return true;
+                    }
                 }
             }
+            "Battery" => {
+                has_battery = true;
+                if let Some(st) = securefs::read_bounded_file(&p.join("status"), 32, false) {
+                    if st.trim().eq_ignore_ascii_case("Discharging") {
+                        battery_discharging = true;
+                    }
+                }
+            }
+            _ => {}
         }
     }
-    !found_supply
+    !(has_battery && battery_discharging)
 }
 
 fn parse_cpuinfo() -> (String, String, usize, Vec<String>) {
@@ -680,6 +747,27 @@ fn detect_tool_version(bin: &str, args: &[&str]) -> String {
         .unwrap_or_else(|| "Installed".into())
 }
 
+pub fn discover_steam_libraries(steam_root: &Path) -> Vec<PathBuf> {
+    let mut libs = vec![steam_root.to_path_buf()];
+    let vdf_path = steam_root.join("steamapps/libraryfolders.vdf");
+    if let Some(raw) = securefs::read_bounded_file(&vdf_path, 65536, false) {
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("\"path\"") {
+                let parts: Vec<&str> = trimmed.split('"').collect();
+                if parts.len() >= 4 {
+                    let unescaped = parts[3].replace("\\\\", "\\");
+                    let p = PathBuf::from(unescaped);
+                    if !libs.contains(&p) {
+                        libs.push(p);
+                    }
+                }
+            }
+        }
+    }
+    libs
+}
+
 fn detect_steam_environment() -> (String, String, bool, bool, String) {
     let home = match std::env::var("HOME") {
         Ok(h) if h.starts_with('/') && !h.contains("..") => PathBuf::from(h),
@@ -704,25 +792,46 @@ fn detect_steam_environment() -> (String, String, bool, bool, String) {
         steam_root = home.join(".local/share/Steam");
     }
 
-    let common_dir = steam_root.join("steamapps/common");
-    let exp_path = common_dir.join("Proton - Experimental");
-    let hotfix_path = common_dir.join("Proton Hotfix");
+    let libs = discover_steam_libraries(&steam_root);
+    let mut base_proton_path = String::new();
+    let mut sniper_runtime_present = false;
 
-    let base_proton_path = if exp_path.exists() {
-        exp_path.to_string_lossy().to_string()
-    } else if hotfix_path.exists() {
-        hotfix_path.to_string_lossy().to_string()
-    } else {
-        String::new()
-    };
+    for name in &["Proton - Experimental", "Proton Hotfix"] {
+        for lib in &libs {
+            let candidate = lib.join("steamapps/common").join(name);
+            if candidate.join("proton").exists() {
+                base_proton_path = candidate.to_string_lossy().to_string();
+                break;
+            }
+        }
+        if !base_proton_path.is_empty() {
+            break;
+        }
+    }
 
-    let sniper_runtime_present = common_dir.join("SteamLinuxRuntime_sniper").exists();
+    for lib in &libs {
+        let common = lib.join("steamapps/common");
+        if common.join("SteamLinuxRuntime_sniper").exists()
+            || common.join("SteamLinuxRuntime_4").exists()
+        {
+            sniper_runtime_present = true;
+        }
+    }
 
-    let omaprot_dir = steam_root
-        .join("compatibilitytools.d")
-        .join("Proton-Omarchy-BleedingEdge");
-    let omaprot_installed = omaprot_dir.join("compatibilitytool.vdf").exists()
-        && omaprot_dir.join("proton").exists();
+    let compat_d = steam_root.join("compatibilitytools.d");
+    let native_dir = compat_d.join("Proton-Omarchy");
+    let bleeding_dir = compat_d.join("Proton-Omarchy-BleedingEdge");
+    let (omaprot_installed, omaprot_dir) =
+        if native_dir.join("compatibilitytool.vdf").exists() && native_dir.join("proton").exists()
+        {
+            (true, native_dir)
+        } else {
+            (
+                bleeding_dir.join("compatibilitytool.vdf").exists()
+                    && bleeding_dir.join("proton").exists(),
+                bleeding_dir,
+            )
+        };
 
     (
         steam_root.to_string_lossy().to_string(),

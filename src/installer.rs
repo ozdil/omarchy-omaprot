@@ -57,18 +57,37 @@ pub fn install_steam_compatibility_tool(
 }
 "#;
 
-    let toolmanifest_vdf = r#""manifest"
-{
+    let mut require_tool_appid = "1628350".to_string();
+    if !probe.base_proton_path.is_empty() {
+        let upstream_manifest = PathBuf::from(&probe.base_proton_path).join("toolmanifest.vdf");
+        if let Some(raw) = securefs::read_bounded_file(&upstream_manifest, 8192, false) {
+            for line in raw.lines() {
+                if line.contains("\"require_tool_appid\"") {
+                    let parts: Vec<&str> = line.split('"').collect();
+                    if parts.len() >= 4 && parts[3].chars().all(|c| c.is_ascii_digit()) {
+                        require_tool_appid = parts[3].to_string();
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let toolmanifest_vdf = format!(
+        r#""manifest"
+{{
   "version" "2"
   "commandline" "/proton %verb%"
-  "require_tool_appid" "1628350"
+  "require_tool_appid" "{}"
   "use_sessions" "1"
   "compatmanager_layer_name" "proton"
-}
-"#;
+}}
+"#,
+        require_tool_appid
+    );
 
     let version_txt = format!(
-        "1760864400 Proton-Omarchy-10.0-AutoAdaptive-{}\n",
+        "1791989105 Proton-Omarchy-11.0-AutoAdaptive-{}\n",
         probe.march_target
     );
 
@@ -142,50 +161,94 @@ fn render_user_settings_py(profile: &OmaProtonProfile, plan: &AutotunePlan) -> S
 /// to detect the live kernel, CPU topology (P/E/LP-E/X3D), GPUs, RAM, and AC/Battery state in <5ms.
 fn render_proton_wrapper(profile: &OmaProtonProfile) -> String {
     let mut script = String::new();
-    script.push_str("#!/bin/bash -p\n");
-    script.push_str("# Proton-Omarchy 10.0 Universal Auto-Adaptive Runtime Wrapper (HANCORE Hardened)\n");
-    script.push_str("set -euo pipefail\n\n");
+    script.push_str("#!/bin/bash\n");
+    script.push_str("# Proton-Omarchy Universal Auto-Adaptive Runtime Wrapper (HANCORE Hardened)\n");
+    script.push_str("set -euo pipefail\n");
+    script.push_str("shopt -s nullglob\n\n");
     script.push_str(&format!("# Active Profile: {} ({})\n\n", profile.name, profile.id));
 
     script.push_str("SELF_DIR=\"$(cd \"$(dirname \"${BASH_SOURCE[0]}\")\" && pwd -P)\"\n\n");
 
-    script.push_str("# 1. Clear conflicting disable flags safely\n");
-    script.push_str("unset PROTON_NO_NTSYNC PROTON_NO_FSYNC PROTON_NO_ESYNC PROTON_DISABLE_NVAPI PROTON_HIDE_NVIDIA_GPU\n");
-    script.push_str("export WINEFSYNC=\"${WINEFSYNC:-1}\"\n");
-    script.push_str("export WINEESYNC=\"${WINEESYNC:-1}\"\n\n");
-
-    script.push_str("# 2. Resolve portable omaprot-engine binary and synthesize live hardware/kernel/GPU env (<5ms)\n");
+    script.push_str("# 1. Resolve portable omaprot-engine binary and synthesize live hardware/kernel/GPU env (<5ms)\n");
     script.push_str("OMAPROT_ENGINE=\"\"\n");
-    script.push_str("if [[ -x \"${SELF_DIR}/omaprot-engine\" ]]; then\n");
-    script.push_str("    OMAPROT_ENGINE=\"${SELF_DIR}/omaprot-engine\"\n");
+    script.push_str("if [[ -x $SELF_DIR/omaprot-engine ]]; then\n");
+    script.push_str("    OMAPROT_ENGINE=\"$SELF_DIR/omaprot-engine\"\n");
     script.push_str("elif command -v omaprot-engine >/dev/null 2>&1; then\n");
     script.push_str("    OMAPROT_ENGINE=\"$(command -v omaprot-engine)\"\n");
-    script.push_str("elif [[ -x \"/usr/bin/omaprot-engine\" ]]; then\n");
+    script.push_str("elif [[ -x /usr/bin/omaprot-engine ]]; then\n");
     script.push_str("    OMAPROT_ENGINE=\"/usr/bin/omaprot-engine\"\n");
-    script.push_str("elif [[ -x \"/usr/share/omarchy/plugins/ozdil.omaprot/omaprot-engine\" ]]; then\n");
-    script.push_str("    OMAPROT_ENGINE=\"/usr/share/omarchy/plugins/ozdil.omaprot/omaprot-engine\"\n");
     script.push_str("fi\n\n");
 
-    script.push_str("if [[ -n \"${OMAPROT_ENGINE}\" ]]; then\n");
-    script.push_str("    eval \"$(\"${OMAPROT_ENGINE}\" --emit-runtime-env 2>/dev/null || true)\"\n");
+    script.push_str("if [[ -n $OMAPROT_ENGINE ]]; then\n");
+    script.push_str("    eval \"$(\"$OMAPROT_ENGINE\" --emit-runtime-env 2>/dev/null || true)\"\n");
     script.push_str("fi\n\n");
 
-    script.push_str("# 3. Enforce OS-Level CPU Affinity (taskset) to isolate L3-less LP-E or non-V-Cache CCD cores\n");
+    script.push_str("# 2. Load optional system-wide and per-game (SteamAppId) overrides\n");
+    script.push_str("global_overrides=\"$HOME/.config/omarchy/proton/overrides.env\"\n");
+    script.push_str("if [[ -f $global_overrides && ! -L $global_overrides ]]; then\n");
+    script.push_str("    source \"$global_overrides\" >/dev/null\n");
+    script.push_str("fi\n\n");
+    script.push_str("app_id=\"${SteamAppId:-${STEAM_COMPAT_APP_ID:-}}\"\n");
+    script.push_str("if [[ -n $app_id && $app_id =~ ^[0-9]+$ ]]; then\n");
+    script.push_str("    game_overrides=\"$HOME/.config/omarchy/proton/games/${app_id}.env\"\n");
+    script.push_str("    if [[ -f $game_overrides && ! -L $game_overrides ]]; then\n");
+    script.push_str("        source \"$game_overrides\" >/dev/null\n");
+    script.push_str("    fi\n");
+    script.push_str("fi\n\n");
+
+    script.push_str("# 3. Enforce OS-Level CPU Affinity (taskset) only on execution verbs\n");
     script.push_str("TASKSET_CMD=()\n");
-    script.push_str("if [[ -n \"${OMAPROTON_TASKSET_CPUS:-}\" && -x \"/usr/bin/taskset\" ]]; then\n");
-    script.push_str("    TASKSET_CMD=(/usr/bin/taskset -c \"${OMAPROTON_TASKSET_CPUS}\")\n");
+    script.push_str("verb=\"${1:-}\"\n");
+    script.push_str("if [[ -n ${OMAPROTON_TASKSET_CPUS:-} && -x /usr/bin/taskset ]] && [[ $verb == \"run\" || $verb == \"waitforexitandrun\" || $verb == \"runinprefix\" ]]; then\n");
+    script.push_str("    TASKSET_CMD=(/usr/bin/taskset -c \"$OMAPROTON_TASKSET_CPUS\")\n");
     script.push_str("fi\n\n");
 
-    script.push_str("# 4. Resolve compiled files/proton first; fallback to Steam Proton - Experimental\n");
-    script.push_str("if [[ -x \"${SELF_DIR}/files/bin/wine64\" && -x \"${SELF_DIR}/proton_dist\" ]]; then\n");
-    script.push_str("    exec \"${TASKSET_CMD[@]}\" \"${SELF_DIR}/proton_dist\" \"$@\"\n");
+    script.push_str("# 4. Resolve compiled files/proton first; fallback to multi-library Steam Proton - Experimental / Hotfix / Proton [0-9]*\n");
+    script.push_str("if [[ -x $SELF_DIR/files/bin/wine64 && -x $SELF_DIR/proton_dist ]]; then\n");
+    script.push_str("    exec \"${TASKSET_CMD[@]}\" \"$SELF_DIR/proton_dist\" \"$@\"\n");
     script.push_str("fi\n\n");
 
-    script.push_str("STEAM_COMMON=\"${HOME}/.local/share/Steam/steamapps/common\"\n");
-    script.push_str("if [[ -x \"${STEAM_COMMON}/Proton - Experimental/proton\" ]]; then\n");
-    script.push_str("    exec \"${TASKSET_CMD[@]}\" \"${STEAM_COMMON}/Proton - Experimental/proton\" \"$@\"\n");
-    script.push_str("elif [[ -x \"${STEAM_COMMON}/Proton Hotfix/proton\" ]]; then\n");
-    script.push_str("    exec \"${TASKSET_CMD[@]}\" \"${STEAM_COMMON}/Proton Hotfix/proton\" \"$@\"\n");
+    script.push_str("steam_libs=(\"$HOME/.local/share/Steam\" \"$HOME/.steam/root\")\n");
+    script.push_str("for vdf in \"$HOME/.local/share/Steam/steamapps/libraryfolders.vdf\" \"$HOME/.steam/root/steamapps/libraryfolders.vdf\"; do\n");
+    script.push_str("    [[ -f $vdf ]] || continue\n");
+    script.push_str("    while IFS= read -r lib_path; do\n");
+    script.push_str("        [[ -n $lib_path ]] && steam_libs+=(\"$lib_path\")\n");
+    script.push_str("    done < <(awk -F'\"' '/\"path\"[[:space:]]*\"/{gsub(/\\\\\\\\/, \"\\\\\", $4); print $4}' \"$vdf\" 2>/dev/null || true)\n");
+    script.push_str("done\n\n");
+
+    script.push_str("target_proton=\"\"\n");
+    script.push_str("for candidate_name in \"Proton - Experimental\" \"Proton Hotfix\"; do\n");
+    script.push_str("    for lib in \"${steam_libs[@]}\"; do\n");
+    script.push_str("        candidate=\"$lib/steamapps/common/$candidate_name/proton\"\n");
+    script.push_str("        if [[ -x $candidate ]]; then\n");
+    script.push_str("            target_proton=\"$candidate\"\n");
+    script.push_str("            break 2\n");
+    script.push_str("        fi\n");
+    script.push_str("    done\n");
+    script.push_str("done\n\n");
+
+    script.push_str("if [[ -z $target_proton ]]; then\n");
+    script.push_str("    numbered_protons=()\n");
+    script.push_str("    for lib in \"${steam_libs[@]}\"; do\n");
+    script.push_str("        for candidate in \"$lib\"/steamapps/common/Proton\\ [0-9]*/proton; do\n");
+    script.push_str("            [[ -x $candidate ]] && numbered_protons+=(\"$candidate\")\n");
+    script.push_str("        done\n");
+    script.push_str("    done\n");
+    script.push_str("    if (( ${#numbered_protons[@]} > 0 )); then\n");
+    script.push_str("        target_proton=$(printf '%s\\n' \"${numbered_protons[@]}\" | sort -Vr | head -n 1)\n");
+    script.push_str("    fi\n");
+    script.push_str("fi\n\n");
+
+    script.push_str("if [[ -n $target_proton ]]; then\n");
+    script.push_str("    upstream_manifest=\"${target_proton%/*}/toolmanifest.vdf\"\n");
+    script.push_str("    self_manifest=\"$SELF_DIR/toolmanifest.vdf\"\n");
+    script.push_str("    if [[ -f $upstream_manifest && -w $self_manifest ]]; then\n");
+    script.push_str("        upstream_rt=$(awk -F'\"' '/\"require_tool_appid\"/{print $4; exit}' \"$upstream_manifest\" 2>/dev/null || true)\n");
+    script.push_str("        if [[ $upstream_rt =~ ^[0-9]+$ ]]; then\n");
+    script.push_str("            sed -i \"s/\\\"require_tool_appid\\\" \\\"[0-9]*\\\"/\\\"require_tool_appid\\\" \\\"$upstream_rt\\\"/\" \"$self_manifest\" 2>/dev/null || true\n");
+    script.push_str("        fi\n");
+    script.push_str("    fi\n");
+    script.push_str("    exec \"${TASKSET_CMD[@]}\" \"$target_proton\" \"$@\"\n");
     script.push_str("else\n");
     script.push_str("    echo \"[OmaProton] Hata: Temel Proton çalışma zamanı bulunamadı.\" >&2\n");
     script.push_str("    exit 1\n");

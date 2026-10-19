@@ -424,11 +424,10 @@ fn merge_envs(target: &mut Vec<(String, String)>, incoming: &[(String, String)])
     }
 }
 
-/// Emits `unset ...` and `export KEY="VALUE"` lines suitable for safe evaluation by the `proton` wrapper at game start.
+/// Emits `export KEY="${KEY:-VALUE}"` lines suitable for safe evaluation by the `proton` wrapper at game start
+/// while preserving any caller-supplied game compatibility workarounds (e.g. `PROTON_NO_FSYNC=1`, `PROTON_DISABLE_NVAPI=1`).
 pub fn render_shell_exports(plan: &AutotunePlan) -> String {
-    let mut out = String::from(
-        "unset PROTON_NO_NTSYNC PROTON_NO_FSYNC PROTON_NO_ESYNC PROTON_DISABLE_NVAPI PROTON_HIDE_NVIDIA_GPU\n",
-    );
+    let mut out = String::new();
     for (k, v) in &plan.merged_env {
         let safe_k: String = k
             .chars()
