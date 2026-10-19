@@ -57,7 +57,7 @@ pub fn install_steam_compatibility_tool(
 }
 "#;
 
-    let mut require_tool_appid = "1628350".to_string();
+    let mut require_tool_appid = "4183110".to_string();
     if !probe.base_proton_path.is_empty() {
         let upstream_manifest = PathBuf::from(&probe.base_proton_path).join("toolmanifest.vdf");
         if let Some(raw) = securefs::read_bounded_file(&upstream_manifest, 8192, false) {
@@ -230,24 +230,20 @@ fn render_proton_wrapper(profile: &OmaProtonProfile) -> String {
     script.push_str("if [[ -z $target_proton ]]; then\n");
     script.push_str("    numbered_protons=()\n");
     script.push_str("    for lib in \"${steam_libs[@]}\"; do\n");
-    script.push_str("        for candidate in \"$lib\"/steamapps/common/Proton\\ [0-9]*/proton; do\n");
-    script.push_str("            [[ -x $candidate ]] && numbered_protons+=(\"$candidate\")\n");
+    script.push_str("        for candidate in \"$lib/steamapps/common/Proton \"[0-9]*/proton; do\n");
+    script.push_str("            if [[ -x $candidate ]]; then\n");
+    script.push_str("                dir_name=\"${candidate%/proton}\"\n");
+    script.push_str("                dir_name=\"${dir_name##*/}\"\n");
+    script.push_str("                numbered_protons+=(\"${dir_name}\"$'\\t'\"${candidate}\")\n");
+    script.push_str("            fi\n");
     script.push_str("        done\n");
     script.push_str("    done\n");
     script.push_str("    if (( ${#numbered_protons[@]} > 0 )); then\n");
-    script.push_str("        target_proton=$(printf '%s\\n' \"${numbered_protons[@]}\" | sort -Vr | head -n 1)\n");
+    script.push_str("        target_proton=$(printf '%s\\n' \"${numbered_protons[@]}\" | sort -t$'\\t' -k1,1Vr | head -n 1 | cut -f2-)\n");
     script.push_str("    fi\n");
     script.push_str("fi\n\n");
 
     script.push_str("if [[ -n $target_proton ]]; then\n");
-    script.push_str("    upstream_manifest=\"${target_proton%/*}/toolmanifest.vdf\"\n");
-    script.push_str("    self_manifest=\"$SELF_DIR/toolmanifest.vdf\"\n");
-    script.push_str("    if [[ -f $upstream_manifest && -w $self_manifest ]]; then\n");
-    script.push_str("        upstream_rt=$(awk -F'\"' '/\"require_tool_appid\"/{print $4; exit}' \"$upstream_manifest\" 2>/dev/null || true)\n");
-    script.push_str("        if [[ $upstream_rt =~ ^[0-9]+$ ]]; then\n");
-    script.push_str("            sed -i \"s/\\\"require_tool_appid\\\" \\\"[0-9]*\\\"/\\\"require_tool_appid\\\" \\\"$upstream_rt\\\"/\" \"$self_manifest\" 2>/dev/null || true\n");
-    script.push_str("        fi\n");
-    script.push_str("    fi\n");
     script.push_str("    exec \"${TASKSET_CMD[@]}\" \"$target_proton\" \"$@\"\n");
     script.push_str("else\n");
     script.push_str("    echo \"[OmaProton] Hata: Temel Proton çalışma zamanı bulunamadı.\" >&2\n");
