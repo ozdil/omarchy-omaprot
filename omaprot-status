@@ -1,0 +1,10 @@
+#!/bin/bash -p
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+ENGINE_BIN="${SCRIPT_DIR}/target/release/omaprot-engine"
+if [[ ! -x "${ENGINE_BIN}" && -x "/usr/bin/omaprot-engine" ]]; then
+    ENGINE_BIN="/usr/bin/omaprot-engine"
+fi
+
+exec "${ENGINE_BIN}" --status

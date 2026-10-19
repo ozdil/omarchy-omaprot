@@ -1,0 +1,46 @@
+#!/bin/bash
+
+# omarchy:summary=Optimize Proton and Wine gaming layer for this machine with the default coding agent
+# omarchy:args=[--inline] [game-name-or-appid]
+# omarchy:examples=omarchy agent proton | omarchy agent proton "Cyberpunk 2077" | omarchy agent proton 1091500
+
+# Follows the exact upstream omarchy-agent-crash pattern: gathers deterministic
+# hardware/kernel/CPU-topology/GPU facts via omaprot-engine, points at the
+# optimize-proton skill, and invokes `omarchy-agent --prompt` so whichever
+# default agent the user selected (`omarchy default agent <name>`) performs
+# the optimization.
+
+set -euo pipefail
+
+inline=()
+if [[ ${1:-} == "--inline" ]]; then
+  inline=(--inline)
+  shift
+fi
+
+target_game="${*:-}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+ENGINE_BIN="${SCRIPT_DIR}/../target/release/omaprot-engine"
+if [[ ! -x "${ENGINE_BIN}" && -x "/usr/bin/omaprot-engine" ]]; then
+  ENGINE_BIN="/usr/bin/omaprot-engine"
+fi
+
+if [[ ! -x "${ENGINE_BIN}" ]]; then
+  echo "omaprot-engine binary not found." >&2
+  exit 1
+fi
+
+if [[ -n "${target_game}" ]]; then
+  prompt="$("${ENGINE_BIN}" --print-ai-prompt "${target_game}")"
+else
+  prompt="$("${ENGINE_BIN}" --print-ai-prompt)"
+fi
+
+if command -v omarchy-agent >/dev/null 2>&1; then
+  exec omarchy-agent "${inline[@]}" --prompt "$prompt"
+elif [[ -x "/home/ozdil/Projects/omarchy/omarchy-core/bin/omarchy-agent" ]]; then
+  exec /home/ozdil/Projects/omarchy/omarchy-core/bin/omarchy-agent "${inline[@]}" --prompt "$prompt"
+else
+  echo "$prompt"
+fi

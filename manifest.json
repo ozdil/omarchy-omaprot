@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "ozdil.omaprot",
+  "name": "OmaProton",
+  "version": "1.0.0",
+  "author": "Ozan Özdil (ozdil)",
+  "license": "MIT",
+  "description": "CachyOS-grade bleeding-edge Proton optimization engine, Linux 7.2+ NTSYNC/BORE orchestrator, and Steam compatibility tool manager for Omarchy Linux.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "OmaProton",
+    "description": "Bleeding-edge Proton profile manager, NTSYNC/BORE kernel optimizer, and x86-64-v3/v4 build orchestrator.",
+    "category": "System",
+    "defaultSection": "right",
+    "aliases": [
+      "omaprot",
+      "omaproton",
+      "proton",
+      "steam",
+      "ntsync",
+      "gaming",
+      "cachyos"
+    ],
+    "allowMultiple": false
+  },
+  "verified": true
+}

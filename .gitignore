@@ -1,0 +1,6 @@
+target/
+*.tmp
+*.log
+__pycache__/
+_metadata/
+*.zip

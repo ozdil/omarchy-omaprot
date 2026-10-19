@@ -1,0 +1,23 @@
+#!/bin/bash -p
+set -euo pipefail
+
+if [[ -n "${LD_PRELOAD:-}" || -n "${LD_LIBRARY_PATH:-}" ]]; then
+    echo "HANCORE Güvenlik İhlali: LD_PRELOAD veya LD_LIBRARY_PATH tespit edildi." >&2
+    exit 1
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+ENGINE_BIN="${SCRIPT_DIR}/target/release/omaprot-engine"
+if [[ ! -x "${ENGINE_BIN}" && -x "/usr/bin/omaprot-engine" ]]; then
+    ENGINE_BIN="/usr/bin/omaprot-engine"
+fi
+
+if [[ "${1:-}" == "--cli" || ! -x "$(command -v quickshell || true)" ]]; then
+    exec "${ENGINE_BIN}"
+fi
+
+if quickshell ipc -p "${SCRIPT_DIR}/qml/shell.qml" call ozdil.omaprot.window toggle >/dev/null 2>&1; then
+    exit 0
+fi
+
+exec quickshell -p "${SCRIPT_DIR}/qml/shell.qml"
